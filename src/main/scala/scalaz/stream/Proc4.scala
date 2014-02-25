@@ -60,6 +60,13 @@ object Proc4 {
       }
     }
 
+  def suspend[F[_],O](p: => Proc4[F,O]): Proc4[F,O] =
+    new Proc4[F,O] {
+      def Match[R](
+        e: (Seq[O], T[R]) => T[R],
+        a: HandleAwait[F,R],
+        h: Throwable => T[R]): T[R] = Task.suspend(p.Match(e,a,h))
+    }
 
   /**
    * Special exception indicating normal termination due to
