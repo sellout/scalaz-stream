@@ -50,11 +50,16 @@ object Proc4 {
 
   def onHalt[F[_],O](p1: Proc4[F,O], p2: Throwable => Proc4[F,O]): Proc4[F,O] =
     new Proc4[F,O] {
-      def Match[R](
-        e: (Seq[O], T[R]) => T[R],
+      def Match[G[_]:Monad:Catchable,R](
+        fg: F ~> G,
+        e: (Seq[O], G[R]) => G[R],
         a: HandleAwait[F,R],
-        h: Throwable => T[R]): T[R] = {
+        h: Throwable => G[R]): G[R] = {
         ??? // 'headsplode
+        p1.Match(
+          emit = (hd,tl) =>
+            tl.attempt.flatMap(_.fold(e => p2(e).Match(e,a,h),
+                                      r => T.now(r)))
         // need to call p1 with some properly jiggered arguments
         // such that p2 gets invoked
       }
