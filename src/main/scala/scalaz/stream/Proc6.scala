@@ -1,6 +1,6 @@
 package scalaz.stream
 
-import scalaz.{\/, ~>}
+import scalaz.{\/, ~>, Catchable, Monoid, Monad}
 import scalaz.\/.{left,right}
 /*
 
@@ -58,13 +58,26 @@ sealed trait Proc6[+F[_],+O] {
       }
     }
   }
+
+  def runFoldMap[G[_],O2](f: O => O2)(implicit M: Monoid[O2], G: Monad[G], C: Catchable[G], E: Sub1[F,G]): G[O2] = {
+    def go(acc: O2, cur: Proc6[G,O2]): G[O2] = suspendF {
+      cur.step.fold(
+        { case End => G.point(acc); case err: Throwable => C.fail(err) },
+        (hd,tl) => go(hd.foldLeft(M.zero)(M.append(_,_)), tl),
+        (req,recv) => G.bind(C.attempt(req))(recv andThen (next => go(acc, next)))
+      )
+    }
+    go(M.zero, E.subprocess(this.map(f)))
+  }
 }
 
 object Proc6 {
   import Step._
 
+  def suspendF[F[_],A](fa: => F[A])(implicit F: Monad[F]): F[A] =
+    F.bind(F.point(()))(_ => fa)
+
   type OnHaltS[F[_],+S,S2,O] = S \/ (S2, S2 => Step[F,S2,O])
-  type JoinS[F[_],+S,O] = (S, Proc6[F,O])
 
   case class Unfold[+F[_],S,+O](seed: S, next: S => Step[F,S,O]) extends Proc6[F,O] {
     def onHaltU[G[_],S2,O2>:O](tl: Throwable => Unfold[G,S2,O2])(implicit E: Sub1[F,G]):
@@ -78,9 +91,6 @@ object Proc6 {
       Proc6[G,O2] = onHaltU(tl.asInstanceOf[Throwable => Unfold[G,Any,O2]])
 
     def map[O2](f: O => O2): Unfold[F,S,O2] = Unfold[F,S,O2](seed, next andThen (_.map(f)))
-
-    def flatMapU[G[_],O2>:O](tl: O => Proc6[G,O2])(implicit E: Sub1[F,G]): Unfold[G,JoinS[G,S,O2],O2] =
-      ???
 
     def step: Step[F,Proc6[F,O],O] = Step.safe {
       next(seed) match {
@@ -104,8 +114,6 @@ object Proc6 {
     }
     def onHalt[G[_],S2,O2>:O](f: Throwable => Unfold[G,S2,O2])(implicit E: Sub1[F,G]):
       Step[G,OnHaltS[G,S,S2,O2],O2]
-    def flatMap[G[_],O2](f: O => Proc6[G,O2])(implicit E: Sub1[F,G]):
-      Step[G,JoinS[G,S,O2],O2]
     def fold[R](halt: Throwable => R,
                 emit: (Seq[O], S) => R,
                 await: (F[Any], (Throwable \/ Any) => S) => R): R
@@ -121,8 +129,6 @@ object Proc6 {
           val tl = f(cause)
           Emit(Seq(), right(tl.seed -> tl.next))
         }
-      def flatMap[G[_],O2](f: Nothing => Proc6[G,O2])(implicit E: Sub1[Nothing,G]): Step[G,JoinS[G,Nothing,O2],O2] =
-        this
       def fold[R](halt: Throwable => R,
                   emit: (Seq[Nothing], Nothing) => R,
                   await: (Nothing, (Throwable \/ Any) => Nothing) => R): R = halt(cause)
@@ -131,12 +137,6 @@ object Proc6 {
       def onHalt[G[_],S2,O2>:O](f: Throwable => Unfold[G,S2,O2])(implicit E: Sub1[Nothing,G]):
         Step[G,OnHaltS[G,S,S2,O2],O2] =
           Emit(head, left(tail))
-      def flatMap[G[_],O2](f: O => Proc6[G,O2])(implicit E: Sub1[Nothing,G]): Step[G,JoinS[G,S,O2],O2] =
-        Step.safe {
-          val hds: Proc6[G,O2] = head.map(f).reverse.foldLeft(halt: Proc6[G,O2])((tl,hd) => hd ++ tl)
-          ???
-          // unfold(tail -> hds)
-        }
       def fold[R](halt: Throwable => R,
                   emit: (Seq[O], S) => R,
                   await: (Nothing, (Throwable \/ Any) => S) => R): R = emit(head, tail)
@@ -144,8 +144,6 @@ object Proc6 {
     case class Await[F[_],Z,S](req: F[Z], recv: Throwable \/ Z => S) extends Step[F,S,Nothing] {
       def onHalt[G[_],S2,O2>:Nothing](f: Throwable => Unfold[G,S2,O2])(implicit E: Sub1[F,G]):
         Step[G,OnHaltS[G,S,S2,O2],O2] = Await(E(req), recv andThen left)
-      def flatMap[G[_],O2](f: Nothing => Proc6[G,O2])(implicit E: Sub1[F,G]): Step[G,JoinS[G,S,O2],O2] =
-        E.substep(this.mapS(s => (s, halt)))
       def fold[R](halt: Throwable => R,
                   emit: (Seq[Nothing], S) => R,
                   await: (F[Any], (Throwable \/ Any) => S) => R): R =
