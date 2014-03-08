@@ -18,17 +18,16 @@ sealed trait Proc6[+F[_],+O] {
   import Proc6._
   import Step._
 
-  def onHalt[G[_],O2>:O](tl: Throwable => Proc6[G,O2])(implicit E: Sub1[F,G]):
-    Proc6[G,O2]
+  def onHalt[G[x]>:F[x],O2>:O](tl: Throwable => Proc6[G,O2]): Proc6[G,O2]
 
-  def ++[G[_],O2>:O](tl: => Proc6[G,O2])(implicit E: Sub1[F,G]): Proc6[G,O2] =
-    E.subprocess(this).onHalt {
+  def ++[G[x]>:F[x],O2>:O](tl: => Proc6[G,O2]): Proc6[G,O2] =
+    this.onHalt {
       case End => tl
       case err => fail(err)
     }
 
-  def onComplete[G[_],O2>:O](tl: => Proc6[G,O2])(implicit E: Sub1[F,G]): Proc6[G,O2] =
-    E.subprocess(this).onHalt {
+  def onComplete[G[x]>:F[x],O2>:O](tl: => Proc6[G,O2]): Proc6[G,O2] =
+    this.onHalt {
       case End => tl
       case err => tl.onHalt { err2 => fail(CausedBy(err2, err)) }
     }
@@ -37,8 +36,8 @@ sealed trait Proc6[+F[_],+O] {
 
   def step: Step[F,Proc6[F,O],O]
 
-  def flatMap[G[_],O2](f: O => Proc6[G,O2])(implicit E: Sub1[F,G]): Proc6[G,O2] = {
-    val p: Proc6[G,Proc6[G,O2]] = E.subprocess(this).map(f)
+  def flatMap[G[x]>:F[x],O2](f: O => Proc6[G,O2]): Proc6[G,O2] = {
+    val p: Proc6[G,Proc6[G,O2]] = this.map(f)
     unfold(p -> (Nil: Seq[Proc6[G,O2]])) { p =>
       val outer = p._1; val inner = p._2
       inner match {
@@ -59,7 +58,7 @@ sealed trait Proc6[+F[_],+O] {
     }
   }
 
-  def runFoldMap[G[_],O2](f: O => O2)(implicit M: Monoid[O2], G: Monad[G], C: Catchable[G], E: Sub1[F,G]): G[O2] = {
+  def runFoldMap[G[x]>:F[x],O2](f: O => O2)(implicit M: Monoid[O2], G: Monad[G], C: Catchable[G]): G[O2] = {
     def go(acc: O2, cur: Proc6[G,O2]): G[O2] = suspendF {
       cur.step.fold(
         { case End => G.point(acc); case err: Throwable => C.fail(err) },
@@ -67,7 +66,7 @@ sealed trait Proc6[+F[_],+O] {
         (req,recv) => G.bind(C.attempt(req))(recv andThen (next => go(acc, next)))
       )
     }
-    go(M.zero, E.subprocess(this.map(f)))
+    go(M.zero, this.map(f))
   }
 }
 
@@ -80,14 +79,14 @@ object Proc6 {
   type OnHaltS[F[_],+S,S2,O] = S \/ (S2, S2 => Step[F,S2,O])
 
   case class Unfold[+F[_],S,+O](seed: S, next: S => Step[F,S,O]) extends Proc6[F,O] {
-    def onHaltU[G[_],S2,O2>:O](tl: Throwable => Unfold[G,S2,O2])(implicit E: Sub1[F,G]):
+    def onHaltU[G[x]>:F[x],S2,O2>:O](tl: Throwable => Unfold[G,S2,O2]):
     Unfold[G,OnHaltS[G,S,S2,O2],O2] = {
       Unfold(left(seed), e => Step.safe { e.fold(
-        s0 => E.substep(next(s0)).onHalt(tl),
+        s0 => next(s0).onHalt(tl),
         { p => p._2(p._1).mapS(s2 => right(s2 -> p._2)) }
       )})
     }
-    def onHalt[G[_],O2>:O](tl: Throwable => Proc6[G,O2])(implicit E: Sub1[F,G]):
+    def onHalt[G[x]>:F[x],O2>:O](tl: Throwable => Proc6[G,O2]):
       Proc6[G,O2] = onHaltU(tl.asInstanceOf[Throwable => Unfold[G,Any,O2]])
 
     def map[O2](f: O => O2): Unfold[F,S,O2] = Unfold[F,S,O2](seed, next andThen (_.map(f)))
