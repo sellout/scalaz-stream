@@ -39,20 +39,23 @@ sealed trait Proc6[+F[_],+O] {
 
   def flatMap[G[_],O2](f: O => Proc6[G,O2])(implicit E: Sub1[F,G]): Proc6[G,O2] = {
     val p: Proc6[G,Proc6[G,O2]] = E.subprocess(this).map(f)
-    unfold(p -> (halt: Proc6[G,O2])) { p =>
+    unfold(p -> (Nil: Seq[Proc6[G,O2]])) { p =>
       val outer = p._1; val inner = p._2
-      inner.step.fold(
-        { case End => outer.step.fold(
-            erro => Halt(erro),
-            (h,t) => if (h.isEmpty) Emit(Vector.empty, (t -> halt))
-                     else Emit(Vector.empty, cons(h.tail, t) -> h.head),
-            (req,recv) => Await(req, recv andThen (_ -> halt))
-          )
-          case erri => Halt(erri)
-        },
-        (head, tail) => Emit(head, outer -> tail),
-        (req,recv) => Await(req, recv andThen (outer -> _))
-      )
+      inner match {
+        case x if x.isEmpty => outer.step.fold(
+          erro => Halt(erro),
+          (h,t) => if (h.isEmpty) Emit(Vector.empty, (t -> Nil))
+                   else Emit(Vector.empty, t -> h),
+          (req,recv) => Await(req, recv andThen (_ -> Nil))
+        )
+        case curt => val h = curt.head; val t = curt.tail; h.step.fold(
+          { case End => Emit(Vector.empty, outer -> t)
+            case err => Halt(err)
+          },
+          (curHd, curTl) => Emit(curHd, outer -> (curTl +: t)),
+          (req,recv) => Await(req, recv andThen (h2 => outer -> (h2 +: t)))
+        )
+      }
     }
   }
 }
