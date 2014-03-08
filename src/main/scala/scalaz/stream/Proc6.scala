@@ -2,6 +2,7 @@ package scalaz.stream
 
 import scalaz.{\/, ~>, Catchable, Monoid, Monad}
 import scalaz.\/.{left,right}
+import scalaz.concurrent.Task
 /*
 
 data Stream f o
@@ -18,7 +19,15 @@ sealed trait Proc6[+F[_],+O] {
   import Proc6._
   import Step._
 
-  def onHalt[G[x]>:F[x],O2>:O](tl: Throwable => Proc6[G,O2]): Proc6[G,O2]
+  def onHalt[G[x]>:F[x],O2>:O](tl: Throwable => Proc6[G,O2]): Proc6[G,O2] =
+    unfoldT((this: Proc6[G,O2]) -> false) { p => Trampoline.suspend {
+      val cur = p._1; val onTail = p._2
+      cur.stepFold(
+        err => if (onTail) Halt(err) else Emit(Vector.empty, tl(err) -> true),
+        (h,t) => Emit(h, t -> onTail),
+        (req,recv) => Await(req, recv andThen ((_, onTail)))
+      )
+    }}
 
   def ++[G[x]>:F[x],O2>:O](tl: => Proc6[G,O2]): Proc6[G,O2] =
     this.onHalt {
@@ -34,20 +43,25 @@ sealed trait Proc6[+F[_],+O] {
 
   def map[O2](f: O => O2): Proc6[F,O2]
 
-  def step: Step[F,Proc6[F,O],O]
+  def step: Trampoline[Step[F,Proc6[F,O],O]]
+
+  def stepFold[R](halt: Throwable => R,
+                  emit: (Seq[O], Proc6[F,O]) => R,
+                  await: (F[Any], (Throwable \/ Any) => Proc6[F,O]) => R): Trampoline[R] =
+    step.map(_.fold(halt, emit, await))
 
   def flatMap[G[x]>:F[x],O2](f: O => Proc6[G,O2]): Proc6[G,O2] = {
     val p: Proc6[G,Proc6[G,O2]] = this.map(f)
-    unfold(p -> (Nil: Seq[Proc6[G,O2]])) { p =>
+    unfoldT(p -> (Nil: Seq[Proc6[G,O2]])) { p =>
       val outer = p._1; val inner = p._2
       inner match {
-        case x if x.isEmpty => outer.step.fold(
+        case x if x.isEmpty => outer.stepFold(
           erro => Halt(erro),
           (h,t) => if (h.isEmpty) Emit(Vector.empty, (t -> Nil))
                    else Emit(Vector.empty, t -> h),
           (req,recv) => Await(req, recv andThen (_ -> Nil))
         )
-        case curt => val h = curt.head; val t = curt.tail; h.step.fold(
+        case curt => val h = curt.head; val t = curt.tail; h.stepFold(
           { case End => Emit(Vector.empty, outer -> t)
             case err => Halt(err)
           },
@@ -60,7 +74,7 @@ sealed trait Proc6[+F[_],+O] {
 
   def runFoldMap[G[x]>:F[x],O2](f: O => O2)(implicit M: Monoid[O2], G: Monad[G], C: Catchable[G]): G[O2] = {
     def go(acc: O2, cur: Proc6[G,O2]): G[O2] = suspendF {
-      cur.step.fold(
+      cur.step.run.fold(
         { case End => G.point(acc); case err: Throwable => C.fail(err) },
         (hd,tl) => go(hd.foldLeft(M.zero)(M.append(_,_)), tl),
         (req,recv) => G.bind(C.attempt(req))(recv andThen (next => go(acc, next)))
@@ -73,31 +87,35 @@ sealed trait Proc6[+F[_],+O] {
 object Proc6 {
   import Step._
 
+  type Trampoline[+A] = Task[A]
+  val Trampoline = Task
+
   def suspendF[F[_],A](fa: => F[A])(implicit F: Monad[F]): F[A] =
     F.bind(F.point(()))(_ => fa)
 
-  type OnHaltS[F[_],+S,S2,O] = S \/ (S2, S2 => Step[F,S2,O])
 
-  case class Unfold[+F[_],S,+O](seed: S, next: S => Step[F,S,O]) extends Proc6[F,O] {
+  type OnHaltS[F[_],+S,S2,O] = S \/ (S2, S2 => Trampoline[Step[F,S2,O]])
+
+  case class Unfold[+F[_],S,+O](seed: S, next: S => Trampoline[Step[F,S,O]]) extends Proc6[F,O] {
     def onHaltU[G[x]>:F[x],S2,O2>:O](tl: Throwable => Unfold[G,S2,O2]):
     Unfold[G,OnHaltS[G,S,S2,O2],O2] = {
-      Unfold(left(seed), e => Step.safe { e.fold(
-        s0 => next(s0).onHalt(tl),
-        { p => p._2(p._1).mapS(s2 => right(s2 -> p._2)) }
+      Unfold(left(seed), e => Task.suspend { e.fold(
+        s0 => next(s0).map(_.onHalt(tl)),
+        { p => val s2 = p._1
+               val next2 = p._2
+               next2(s2).map(_.mapS(s2 => right(s2 -> next2))) }
       )})
     }
-    def onHalt[G[x]>:F[x],O2>:O](tl: Throwable => Proc6[G,O2]):
-      Proc6[G,O2] = onHaltU(tl.asInstanceOf[Throwable => Unfold[G,Any,O2]])
+    //def onHalt[G[x]>:F[x],O2>:O](tl: Throwable => Proc6[G,O2]):
+    //  Proc6[G,O2] = onHaltU(tl.asInstanceOf[Throwable => Unfold[G,Any,O2]])
 
-    def map[O2](f: O => O2): Unfold[F,S,O2] = Unfold[F,S,O2](seed, next andThen (_.map(f)))
+    def map[O2](f: O => O2): Unfold[F,S,O2] = Unfold[F,S,O2](seed, s => Task.suspend(next(s)).map(_.map(f)))
 
-    def step: Step[F,Proc6[F,O],O] = Step.safe {
-      next(seed) match {
-        case h@Halt(_) => h
-        case Await(req,recv) => Await(req, recv andThen (seed2 => unfold(seed2)(next)))
-        case Emit(hd,tl) => Emit(hd, unfold(tl)(next))
-      }
-    }
+    def step: Trampoline[Step[F,Proc6[F,O],O]] = Trampoline.suspend { next(seed).map {
+      case h@Halt(_) => h
+      case Await(req,recv) => Await(req, recv andThen (seed2 => Unfold(seed2, next)))
+      case Emit(hd,tl) => Emit(hd, Unfold(tl, next))
+    }}
   }
 
   sealed trait Step[+F[_],+S,+O] {
@@ -151,9 +169,9 @@ object Proc6 {
   }
 
   def emitAll[O](o: Seq[O]): Proc6[Nothing,O] =
-    unfold(false) {
-      case false => Emit(o, true)
-      case true => Halt(End)
+    unfoldT(false) {
+      case false => Task.now(Emit(o, true))
+      case true => Task.now(Halt(End))
     }
 
   def emit[O](o: O): Proc6[Nothing,O] =
@@ -162,11 +180,11 @@ object Proc6 {
   def cons[F[_],O](head: Seq[O], tail: Proc6[F,O]): Proc6[F,O] =
     emitAll(head) ++ tail
 
-  def unfold[F[_],S,O](seed: S)(f: S => Step[F,S,O]): Proc6[F,O] =
+  def unfoldT[F[_],S,O](seed: S)(f: S => Trampoline[Step[F,S,O]]): Proc6[F,O] =
     Unfold(seed, f)
 
   def fail(cause: Throwable): Proc6[Nothing,Nothing] =
-    unfold(())(_ => Halt(cause))
+    unfoldT(())(_ => Task.now(Halt(cause)))
 
   val halt = fail(End)
 
