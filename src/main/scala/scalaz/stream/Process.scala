@@ -294,7 +294,8 @@ sealed abstract class Process[+F[_],+O] extends Process1Ops[F,O] {
       case Await(req,recv,fb,c) => Await(req, recv andThen (_.onComplete(p2)), fb.onComplete(p2), c.onComplete(p2))
       case Emit(h, t) => Emit(h, t.onComplete(p2))
       case h@Halt(e) =>
-        try p2.causedBy(e)
+        // try p2.causedBy(e)
+        try p2.causedBy(e).orElse(halt, p2)
         catch { case End => h
         case e2: Throwable => Halt(CausedBy(e2, e))
         }
@@ -391,7 +392,9 @@ sealed abstract class Process[+F[_],+O] extends Process1Ops[F,O] {
     case Emit(h, t) => Emit(h, this pipe t)
     case Await1(recv,fb,c) => this.step.flatMap { s =>
       s.fold { hd =>
-        s.tail pipe (process1.feed(hd)(p2))
+        // we add current cleanup to `s.tail`
+        s.tail.orElse(halt, s.cleanup) pipe (process1.feed(hd)(p2))
+        // s.tail pipe (process1.feed(hd)(p2))
       } (halt pipe fb, e => fail(e) pipe c)
     }
   }

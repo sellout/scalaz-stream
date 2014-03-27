@@ -84,8 +84,15 @@ object ResourceSafetySpec extends Properties("resource-safety") {
 
   property("io.resource - two pipes") = secure {
     var cleanedUp = false
-    val a = io.resource(Task.now(()))(_ => Task.delay(cleanedUp = true))(_ => Task.delay(cleanedUp = false))
-    val res = a.once.once.runLog.run
+    val a = io.resource(Task.now(()))(_ => Task.delay(cleanedUp = true))(_ =>
+      Task.delay(()) // cleanedUp = false)
+    )
+    // issue is that outermost Await does not have the cleanup in it
+    // kill is not properly compositional? or pipe needs to propagate
+    // the cleanup action forward
+    val res = a.once.once.once.once.runLog.run
+    // this succeeds
+    // val res = a.once.runLog.run
     (res.size == 1) :| "nonempty result" &&
     cleanedUp :| "resources released"
   }
@@ -108,6 +115,10 @@ object ResourceSafetySpec extends Properties("resource-safety") {
 
   property("onComplete with pipe") = secure {
     var called = false
+    // issue here is that onComplete just gets put in tail argument of Emit
+    // so when `once` kills this `Await`, it goes to the cleanup argument
+    // of this `Await`. For a process that's in onComplete, need to replicate
+    // it to its own cleanup
     val a = Process.emit(1) onComplete Process.eval_(Task.delay(called = true))
     val res = a.once.runLog.run
     (res.size == 1) :| "nonempty result" &&
