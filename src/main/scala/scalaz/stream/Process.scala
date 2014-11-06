@@ -545,15 +545,23 @@ object Process extends ProcessInstances {
    * Marker trait representing process in Emit or Await state.
    * Is useful for more type safety.
    */
-  sealed trait EmitOrAwait[+F[_], +O] extends Process[F, O]
+  sealed trait EmitOrAwait[+F[_], +O] extends Process[F, O] {
 
+    def emitOrAwait[F2[x]>:F[x], R](seq: Seq[O] => R, handler: HandleAwait[F2,O,R]): R
+  }
+
+  private[stream] trait HandleAwait[F[_], -O, +R] {
+    def apply[x]: (F[x], EarlyCause \/ x => Trampoline[Process[F,O]]) => R
+  }
 
   /**
    * The `Halt` constructor instructs the driver
    * that the last evaluation of Process completed with
    * supplied cause.
    */
-  case class Halt(cause: Cause) extends HaltEmitOrAwait[Nothing, Nothing] with HaltOrStep[Nothing, Nothing]
+  case class Halt(cause: Cause) extends HaltEmitOrAwait[Nothing, Nothing] with HaltOrStep[Nothing, Nothing] {
+    private[stream] def haltOrStep[R](h: Cause => R, s: Step[Nothing,Nothing] => R): R = h(cause)
+  }
 
 
   /**
@@ -567,7 +575,9 @@ object Process extends ProcessInstances {
    * Process.emit
    * Process.emitAll
    */
-  case class Emit[+O](seq: Seq[O]) extends HaltEmitOrAwait[Nothing, O] with EmitOrAwait[Nothing, O]
+  case class Emit[+O](seq: Seq[O]) extends HaltEmitOrAwait[Nothing, O] with EmitOrAwait[Nothing, O] {
+    def emitOrAwait[F2[x]>:Nothing,R](f: Seq[O] => R, handler: HandleAwait[F2,O,R]): R = f(seq)
+  }
 
   /**
    * The `Await` constructor instructs the driver to evaluate
@@ -596,6 +606,9 @@ object Process extends ProcessInstances {
      */
     def extend[F2[x] >: F[x], O2](f: Process[F, O] => Process[F2, O2]): Await[F2, A, O2] =
       Await[F2, A, O2](req, r => Trampoline.suspend(rcv(r)).map(f))
+
+    def emitOrAwait[F2[x]>:F[x], R](seq: Seq[O] => R, handler: HandleAwait[F2,O,R]): R =
+      handler.apply[A](req, rcv)
   }
 
 
@@ -630,7 +643,9 @@ object Process extends ProcessInstances {
   /**
    * Marker trait representing next step of process or terminated process in `Halt`
    */
-  sealed trait HaltOrStep[+F[_], +O]
+  sealed trait HaltOrStep[+F[_], +O] {
+    private[stream] def haltOrStep[R](h: Cause => R, s: Step[F,O] => R): R
+  }
 
   /**
    * Intermediate step of process.
@@ -638,6 +653,7 @@ object Process extends ProcessInstances {
    */
   case class Step[+F[_], +O](head: EmitOrAwait[F, O], next: Cont[F, O]) extends HaltOrStep[F, O] {
     def toProcess : Process[F,O] = Append(head.asInstanceOf[HaltEmitOrAwait[F,O]],next.stack)
+    def haltOrStep[R](h: Cause => R, s: Step[F,O] => R): R = s(this)
   }
 
   /**
