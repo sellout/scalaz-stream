@@ -59,6 +59,50 @@ object parser {
         }}
       process.pipe(go(Input.empty, false))
     }
+    final def accept[O2](f: PartialFunction[O,O2]): Parser[F,O2] =
+      edit { _.map {
+        case e@Emit1(o) => f.lift(o).map(Emit1(_)).getOrElse(Suspend(ParseMessage.empty))
+        case r@Record(_) => r
+        case Commit => Commit
+        case s@Suspend(_) => s
+      }}
+
+    final def tee[F2[x]>:F[x],O2,O3](p2: Parser[F2,O2])(t: Tee[O,O2,O3]): Parser[F2,O3] = {
+      def go(t: Tee[O,O2,O3]): Tee[Instruction[F2,O], Instruction[F2,O2], Instruction[F2,O3]] = {
+        t.step.haltOrStep (
+          { case Cause.End => Process.halt
+            case c => Process.Halt(c) },
+          s => s.head.emitOrAwait(
+            out => Process.emitAll(out map (Emit1(_))) ++ go(s.next.continue),
+            new Process.HandleAwait[Env[O,O2]#T,
+                                    O3,
+                                    Tee[Instruction[F2,O], Instruction[F2,O2], Instruction[F2,O3]]] {
+              def apply[x] = (req, rcv) => {
+                val req1 = req.asInstanceOf[Env[Instruction[F2,O],Instruction[F2,O2]]#T[x]]
+                Process.awaitOr[Env[Instruction[F2,O],Instruction[F2,O2]]#T,x,Instruction[F2,O3]](req1)(
+                  e => go(rcv(left(e)).run))(
+                  { case e@Emit1(o) => go(rcv(right(o.asInstanceOf[x])).run)
+                    case r@Record(_) => Process.emit(r.asInstanceOf[Instruction[F2,O3]]) ++
+                                        go(s.toProcess)
+                    case Commit => Process.emit(Commit) ++ go(s.toProcess)
+                    case e@Suspend(_) => Process.emit(e.asInstanceOf[Instruction[F2,O3]]) ++
+                                         go(s.toProcess)
+                  }
+                )
+              }
+            }
+          )
+        )
+      }
+      edit { _.tee(p2.process)(go(t)) }
+    }
+
+    final def withFilter(f: O => Boolean): Parser[F,O] =
+      edit { _.map {
+        case e@Emit1(o) => if (!f(o)) Suspend(ParseMessage.empty) else e
+        case e => e
+      }}
+
     final def ++[F2[x] >: F[x], O2 >: O](p2: => Parser[F2, O2]): Parser[F2, O2] =
       append(p2)
     final def |[F2[x]>:F[x],O2](p2: Parser[F2,O2]) = this.or(p2)
@@ -67,6 +111,9 @@ object parser {
   case class ParseMessage(stack: List[String]) {
     def ::(msg: String) = copy(stack = msg :: stack)
     override def toString = stack.mkString("\n")
+  }
+  object ParseMessage {
+    val empty = ParseMessage(List())
   }
   case class ParseError(unparsed: Input[Any],
                         message: ParseMessage) extends Throwable {
@@ -134,8 +181,20 @@ object parser {
   /** Await a single input from the right and commit after it has been consumed. */
   def attemptR[A]: ParserT[Any,A,A] = peekR[A] ++ commit
 
-  /** The parser which succeeds but ignores all input. */
+  /** The parser which ignores all input. Calls `suspend` after each value read. */
   def default1[A]: Parser1[A,Nothing] = await1[A].flatMap { _ => suspend }.repeat
+
+  /**
+   * The parser which ignores all input from the left branch.
+   * Calls `suspend` after each value read.
+   */
+  def defaultL[A]: ParserT[A,Any,Nothing] = default1
+
+  /**
+   * The parser which ignores all input from the right branch.
+   * Calls `suspend` after each value read.
+   */
+  def defaultR[A]: ParserT[Any,A,Nothing] = awaitR[A].flatMap { _ => suspend }.repeat
 
   /** The parser that emits a single value. */
   def emit[A](a: A): Parser1[Any,A] = Parser { Process.emit(Instruction.Emit1(a)) }
@@ -156,13 +215,22 @@ object parser {
     Process.emitAll(List(Instruction.Record(Input.R(a)), Instruction.Emit1(a)))
   }}
 
+  /** Await inputs repeatedly, but suspend before emitting each. */
+  def peeks1[A]: Parser1[A,A] = peek1[A].flatMap { a => suspend ++ emit(a) }.repeat
+
+  /** Await inputs repeatedly from the left branch, but suspend before emitting each. */
+  def peeksL[A]: ParserT[A,Any,A] = peeks1
+
+  /** Await inputs repeatedly from the right branch, but suspend before emitting each. */
+  def peeksR[A]: ParserT[Any,A,A] = peekR[A].flatMap { a => suspend ++ emit(a) }.repeat
+
   /**
    * The parser that consumes no input and switches branches immediately. If there
-   * are no other branches currently active to consume buffered input, parsing fails.
+   * are no other branches currently active to consume the input, parsing will fail.
    */
   val suspend: Parser1[Any,Nothing] = Parser { Process.emit(Instruction.Suspend(ParseMessage(Nil))) }
 
-  /** In the event that `p` fails with a `ParseMessage`, pushes `msg` onto the stack. */
+  /** In the event that `p` suspends, pushes `msg` onto its stack. */
   def scope[X,Y,A](msg: String)(p: ParserT[X,Y,A]): ParserT[X,Y,A] =
     p.edit { _ map {
       case Suspend(stack) => Suspend(msg :: stack)
