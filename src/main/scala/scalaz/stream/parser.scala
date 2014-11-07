@@ -14,11 +14,19 @@ object parser {
   type ParserY[-I,-I2,+O] = Parser[Env[I,I2]#Y,O]
 
   case class Parser[+F[_],+O](process: Process[F,Instruction[F,O]]) {
+    final def accept[O2](f: PartialFunction[O,O2]): Parser[F,O2] =
+      edit { _.map {
+        case e@Emit1(o) => f.lift(o).map(Emit1(_)).getOrElse(Suspend(ParseMessage.empty))
+        case r@Record(_) => r
+        case Commit => Commit
+        case s@Suspend(_) => s
+      }}
     final def append[F2[x] >: F[x], O2 >: O](p2: => Parser[F2, O2]): Parser[F2, O2] =
       edit(_ ++ p2.process)
     def edit[F2[x] >: F[x], O2](f: Process[F,Instruction[F,O]] => Process[F2,Instruction[F2,O2]]): Parser[F2,O2] =
       Parser(f(process))
 
+    final def drain: Parser[F,Nothing] = flatMap(_ => halt)
     final def flatMap[F2[x] >: F[x], O2](f: O => Parser[F2, O2]): Parser[F2, O2] = Parser {
       process.flatMap {
         case Emit1(o) => f(o).process
@@ -59,13 +67,7 @@ object parser {
         }}
       process.pipe(go(Input.empty, false))
     }
-    final def accept[O2](f: PartialFunction[O,O2]): Parser[F,O2] =
-      edit { _.map {
-        case e@Emit1(o) => f.lift(o).map(Emit1(_)).getOrElse(Suspend(ParseMessage.empty))
-        case r@Record(_) => r
-        case Commit => Commit
-        case s@Suspend(_) => s
-      }}
+    final def scope(msg: String): Parser[F,O] = parser.scope(msg)(this)
 
     final def tee[F2[x]>:F[x],O2,O3](p2: Parser[F2,O2])(t: Tee[O,O2,O3]): Parser[F2,O3] = {
       def go(t: Tee[O,O2,O3]): Tee[Instruction[F2,O], Instruction[F2,O2], Instruction[F2,O3]] = {
@@ -129,7 +131,9 @@ object parser {
         emitSuspend: Boolean,
         unparsed: Input[F],
         p: Process[F,Instruction[F,O]],
-        p2: Process[F,Instruction[F,O]]): Process[F,Instruction[F,O]] = Process.suspend { out match {
+        p2: Process[F,Instruction[F,O]]): Process[F,Instruction[F,O]] = Process.suspend {
+      // println(s"out: $out   $unparsed  emit-suspend: $emitSuspend")
+      out match {
       case Seq(Emit1(_), tl@_*) =>
         val emitstl = out.span { case Emit1(o) => true; case _ => false }
         Process.emitAll(emitstl._1) ++ go(emitstl._2, emitSuspend, unparsed, p, p2)
@@ -139,20 +143,29 @@ object parser {
         go(tl, emitSuspend, unparsed append i.asInstanceOf[Input[F]], p, p2)
       case Seq(s0@Suspend(_), tl@_*) =>
         val s = s0.asInstanceOf[Instruction[F,O]] // Scala fail here, this cast should not be needed
-        if (emitSuspend && unparsed.nonEmpty) Process.emit(s) ++ go(tl, false, Input.empty, p2, p)
-        else if (emitSuspend && !unparsed.nonEmpty) go(tl, false, Input.empty, p2, p)
-        else go(tl, true, Input.empty, unparsed.feed(p2), p)
+        val pnext = if (tl.nonEmpty) Process.emitAll(tl) ++ p else p
+        if (emitSuspend && unparsed.nonEmpty)
+          Process.emitAll(List(Record(unparsed), s)) ++ go(Vector.empty, false, Input.empty, p2, pnext)
+        else if (emitSuspend && unparsed.isEmpty)
+          go(Vector.empty, false, Input.empty, p2, pnext)
+        else {
+          // println(s"feeding unparsed  $unparsed  to other branch")
+          go(Vector.empty, unparsed.nonEmpty, Input.empty, unparsed.feed(p2), pnext)
+        }
       case _ if out.isEmpty =>
         p.step.haltOrStep (
           { case Cause.End => p2
             case c => p2.kill.causedBy(c) },
           s => s.head.emitOrAwait(
-            out => go(out, emitSuspend, unparsed, s.next.continue, p2),
+            out => { go(out, emitSuspend, unparsed, s.next.continue, p2) },
             new Process.HandleAwait[F,Instruction[F,O], Process[F,Instruction[F,O]]] { def apply[x] =
-              (req, rcv) => Process.awaitOr[F,x,Instruction[F,O]](req)(
-                e => go(out, emitSuspend, unparsed, rcv(left(e)).run, p2))(
-                a => go(out, emitSuspend, unparsed, rcv(right(a)).run, p2)
-              )
+              (req, rcv) => {
+                // println("awaiting")
+                Process.awaitOr[F,x,Instruction[F,O]](req)(
+                  e => go(out, emitSuspend, unparsed, rcv(left(e)).run +: s.next, p2))(
+                  a => go(out, emitSuspend, unparsed, rcv(right(a)).run +: s.next, p2)
+                )
+              }
             })
         )
     }}
@@ -181,12 +194,12 @@ object parser {
   /** Await a single input from the right and commit after it has been consumed. */
   def attemptR[A]: ParserT[Any,A,A] = peekR[A] ++ commit
 
-  /** The parser which ignores all input. Calls `suspend` after each value read. */
-  def default1[A]: Parser1[A,Nothing] = await1[A].flatMap { _ => suspend }.repeat
+  /** The parser which commits to and ignores all input. Suspends after each value read. */
+  def default1[A]: Parser1[A,Nothing] = (peek1[A] ++ commit ++ suspend).repeat.drain
 
   /**
-   * The parser which ignores all input from the left branch.
-   * Calls `suspend` after each value read.
+   * The parser which commits to and ignores all input from the
+   * left branch. Calls `suspend` after each value read.
    */
   def defaultL[A]: ParserT[A,Any,Nothing] = default1
 
@@ -202,6 +215,9 @@ object parser {
   /** The parser that emits a `Seq[A]` of values. */
   def emitAll[A](a: Seq[A]): Parser1[Any,A] = Parser { Process.emitAll(a map (Instruction.Emit1(_))) }
 
+  /** The parser which consumes no input and halts immediately. */
+  def halt: Parser[Nothing,Nothing] = Parser { Process.halt }
+
   /** Await a single input, but leave it unconsumed. */
   def peek1[A]: Parser1[A,A] = Parser { Process.receive1((a: A) =>
     Process.emitAll(List(Instruction.Record(Input.Single(a)), Instruction.Emit1(a))))
@@ -215,14 +231,14 @@ object parser {
     Process.emitAll(List(Instruction.Record(Input.R(a)), Instruction.Emit1(a)))
   }}
 
-  /** Await inputs repeatedly, but suspend before emitting each. */
-  def peeks1[A]: Parser1[A,A] = peek1[A].flatMap { a => suspend ++ emit(a) }.repeat
+  /** Await inputs repeatedly, but suspend after emitting each. */
+  def peeks1[A]: Parser1[A,A] = (peek1[A] ++ suspend).repeat
 
-  /** Await inputs repeatedly from the left branch, but suspend before emitting each. */
+  /** Await inputs repeatedly from the left branch, but suspend after emitting each. */
   def peeksL[A]: ParserT[A,Any,A] = peeks1
 
-  /** Await inputs repeatedly from the right branch, but suspend before emitting each. */
-  def peeksR[A]: ParserT[Any,A,A] = peekR[A].flatMap { a => suspend ++ emit(a) }.repeat
+  /** Await inputs repeatedly from the right branch, but suspend after emitting each. */
+  def peeksR[A]: ParserT[Any,A,A] = (peekR[A] ++ suspend).repeat
 
   /**
    * The parser that consumes no input and switches branches immediately. If there
@@ -231,7 +247,7 @@ object parser {
   val suspend: Parser1[Any,Nothing] = Parser { Process.emit(Instruction.Suspend(ParseMessage(Nil))) }
 
   /** In the event that `p` suspends, pushes `msg` onto its stack. */
-  def scope[X,Y,A](msg: String)(p: ParserT[X,Y,A]): ParserT[X,Y,A] =
+  def scope[F[_],A](msg: String)(p: Parser[F,A]): Parser[F,A] =
     p.edit { _ map {
       case Suspend(stack) => Suspend(msg :: stack)
       case a => a
@@ -272,6 +288,7 @@ object parser {
       def feed[F2[x]>:Nothing,O](p: Process[F2,O]) = p
       def nonEmpty: Boolean = false
       def append[F2[x]>:Nothing](i: Input[F2]): Input[F2] = i
+      override def toString = "<empty-input>"
     }
     def Single[I](i: I): Input[Env[I,Any]#Is] = L(i).asInstanceOf[Input[Env[I,Any]#Is]]
     def L[I](i: I): Input[Env[I,Any]#T] = T(Vector(i), Vector.empty)
@@ -281,7 +298,7 @@ object parser {
       def feed[F2[x]>:Env[I1,I2]#T[x],O](p: Process[F2,O]) = {
         val y = p.asInstanceOf[Wye[I1,I2,O]]
         val y2 = wye.feedR(rights)(wye.feedL(lefts)(y))
-        y.asInstanceOf[Process[F2,O]]
+        y2.asInstanceOf[Process[F2,O]]
       }
       def nonEmpty = lefts.nonEmpty || rights.nonEmpty
       def append[F2[x]>:Env[I1,I2]#T[x]](i: Input[F2]): Input[F2] = i match {
