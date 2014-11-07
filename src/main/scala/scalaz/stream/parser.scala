@@ -44,7 +44,7 @@ object parser {
         val (hd, tl) = p.unemit
         if (hd.nonEmpty) Process.emitAll(hd map (Emit1(_))) ++ go(tl)
         else if (tl.isHalt) tl.asInstanceOf[Process1[Instruction[F,O], Instruction[F,O2]]]
-        else Process.await1[Instruction[F,O]].flatMap {
+        else Process.awaitOr(Process.L[Instruction[F,O]])(e => go(p.injectCause(e))) {
           case Emit1(o) => go(process1.feed1(o)(p))
           case c@Commit => Process.emit(c) ++ go(tl)
           case e@Suspend(_) => Process.emit(e) ++ go(tl)
@@ -155,7 +155,8 @@ object parser {
       case _ if out.isEmpty =>
         p.step.haltOrStep (
           { case Cause.End => p2
-            case c => p2.kill.causedBy(c) },
+            case Cause.Kill => p2.injectCause(Cause.Kill)
+            case e@Cause.Error(_) => p2.injectCause(e) },
           s => s.head.emitOrAwait(
             out => { go(out, emitSuspend, unparsed, s.next.continue, p2) },
             new Process.HandleAwait[F,Instruction[F,O], Process[F,Instruction[F,O]]] { def apply[x] =
