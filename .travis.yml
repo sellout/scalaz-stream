@@ -5,3 +5,5 @@ scala:
 jdk:
   - oraclejdk7
   - openjdk7
+script: "sbt clean coverage test"
+after_success: "sbt coveralls"

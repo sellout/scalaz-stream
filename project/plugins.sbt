@@ -8,3 +8,7 @@ addSbtPlugin("me.lessis" % "bintray-sbt" % "0.1.1")
 addSbtPlugin("com.typesafe.sbt" % "sbt-osgi" % "0.6.0")
 
 addSbtPlugin("com.github.tkawachi" % "sbt-doctest" % "0.3.2")
+
+addSbtPlugin("org.scoverage" % "sbt-scoverage" % "1.0.1")
+
+addSbtPlugin("org.scoverage" % "sbt-coveralls" % "1.0.0.BETA1")

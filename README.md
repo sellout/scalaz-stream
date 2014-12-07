@@ -2,6 +2,7 @@ scalaz-stream
 =============
 
 [![Build Status](https://travis-ci.org/scalaz/scalaz-stream.png?branch=master)](http://travis-ci.org/scalaz/scalaz-stream)
+[![Coverage Status](https://img.shields.io/coveralls/scalaz/scalaz-stream.svg)](https://coveralls.io/r/scalaz/scalaz-stream)
 
 ### Where to get it ###
 

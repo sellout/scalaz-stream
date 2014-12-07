@@ -192,6 +192,7 @@ object WyeSpec extends  Properties("Wye"){
 
   // checks we are safe on thread stack even after emitting million values
   // non-deterministically from both sides
+/*
   property("merge.million") = secure {
     val count = 1000000
     val m =
@@ -210,6 +211,7 @@ object WyeSpec extends  Properties("Wye"){
       (result.size >= count / 1000)
 
   }
+*/
 
   // checks we are able to handle reasonable number of deeply nested wye`s .
   property("merge.deep-nested") = secure {

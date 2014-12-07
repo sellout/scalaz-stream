@@ -90,6 +90,7 @@ object MergeNSpec extends Properties("mergeN") {
 
 
   //merges 10k of streams, each with 100 of elements
+/*
   property("merge-million") = secure {
     val count = 1000
     val eachSize = 1000
@@ -103,6 +104,7 @@ object MergeNSpec extends Properties("mergeN") {
 
     (result == Some(499500000)) :| s"All items were emitted: $result"
   }
+*/
 
   property("merge-maxOpen") = secure {
     val count = 100
