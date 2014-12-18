@@ -69,7 +69,7 @@ object Process1Spec extends Properties("Process1") {
         , "fold" |: pi.fold(0)(_ + _).toList === List(li.fold(0)(_ + _))
         , "foldMap" |: pi.foldMap(_.toString).toList.lastOption.toList === List(li.map(_.toString).fold(sm.zero)(sm.append(_, _)))
         , "forall" |: pi.forall(g).toList === List(li.forall(g))
-        , "id" |: ((pi |> id).toList === li) && ((id |> pi).toList === li)
+        , "id" |: ((pi |> id).toList === li) && ((id |> pi).disconnect(Cause.Kill).toList === li)
         , "intersperse" |: pi.intersperse(0).toList === li.intersperse(0)
         , "last" |:  Process(0, 10).last.toList === List(10)
         , "lastOr" |: pi.lastOr(42).toList.head === li.lastOption.getOrElse(42)
@@ -189,7 +189,7 @@ object Process1Spec extends Properties("Process1") {
   }
 
   property("inner-cleanup") = secure {
-    val p = Process.range(0,20).liftIO
+    val p = Process.range(0,20).toSource
     var called  = false
     ((p onComplete suspend{ called = true ; halt})
      .take(10).take(4).onComplete(emit(4)).runLog.run == Vector(0,1,2,3,4))
